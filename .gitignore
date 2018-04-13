@@ -1,0 +1,6 @@
+<<<<<<< HEAD
+*.pro.user
+=======
+# Add any directories, files, or patterns you don't want to be tracked by version control
+*.pro.user
+>>>>>>> origin/master
