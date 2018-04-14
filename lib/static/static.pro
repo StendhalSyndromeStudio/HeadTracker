@@ -1,4 +1,7 @@
 TEMPLATE = subdirs
 
 SUBDIRS += \
-    AHRS
+    AHRS \
+    DataProvider \
+    Converter \
+    TrackerPacket

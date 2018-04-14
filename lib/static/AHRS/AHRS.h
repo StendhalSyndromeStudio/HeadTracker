@@ -1,50 +1,77 @@
 #ifndef AHRS_H
 #define AHRS_H
 
+#include <QtCore>
+#include <QVector>
 #include <QQuaternion>
-/**
- * @brief Класс получения угла поворота по данным акселерометра и гироскопа.
- * Для расчета используется фильтр Махоуни
- */
-class AHRS {
+#include <QVector3D>
+#include <factoraccmag.h>
+#include <stm32.h>
+#include <floataverage.h>
+#include <kalmanfilter.h>
+#include <madgwickfilter.h>
+#include <itrackerpacket.h>
 
-public:
-    AHRS( ) = delete;
-    /**
-     * @brief Получаем угол поворота в виде кватерниона
-     * @param gX значение гироскопа по оси X
-     * @param gY значение гироскопа по оси Y
-     * @param gZ значение гироскопа по оси Z
-     * @param aX значение акселерометра по оси X
-     * @param aY значение акселерометра по оси Y
-     * @param aZ значение акселерометра по оси Z
-     * @return угол поворота
-     */
-    static QQuaternion rotation( float gX, float gY, float gZ, float aX, float aY, float aZ );
+class AHRS : public QObject
+{
+    Q_OBJECT
+    private:
+        QVector<FloatAverage *> _driftGyr;
+        double _drift_gyr[ 3 ];
+        QVector<FactorAccMag *> _fctAcc;
+        bool _cutOffAcc;
+        STM32 _sensorData;
+        QVector<QString> _dataString;
+        QVector<KalmanFilter *> _filterAcc;
+        QVector<KalmanFilter *> _filterGyr;
+        bool _isStart;
+        MadgwickFilter _madgwickFilter;
 
-    static void sampleFreq( float value );
-    static float sampleFreq( );
-private:
-    static volatile float _scalar;
-    static volatile float _x;
-    static volatile float _y;
-    static volatile float _z;
+        int _calibrationCount;
+        int _calibrationSize;
+        bool _isCalibrationGyr;
 
-    static volatile float _sampleFreq;
-    static volatile float _twoKp;
-    static volatile float _twoKi;
+        void gyrCalibration( );
 
-    static volatile float _integralFBx;
-    static volatile float _integralFBy;
-    static volatile float _integralFBz;
-    /**
-     * @brief алгоритм быстрой инверсии квадратного корня
-     * как в Quake 3 от Кармака
-     * @param x
-     * @return
-     */
-    static float invSqrt( float x );
+        void calculateAngle( );
+        void correctionData( );
+        void applyKalmanFilter( );
+        void calculateQuaternion( );
 
+        float    _scaleGyr;
+        double   _scaleAcc;
+        double   _scaleMag;
+        double   _deltaGyr;
+        double   _cutoffGyr;
+        double   _deltaAcc;
+        double   _magDeclination;
+    public:
+        float    SCALE_GYR( );
+        double   SCALE_ACC( );
+        double   SCALE_MAG( );
+        double   DELTA_GYR( );
+        double   CUTOFF_GYR( );
+        double   DELTA_ACC( );
+        double   RAD_TO_DEG( );
+        double   DEG_TO_RAD( );
+        double   MAG_DECLINATION( );
+
+        void   SCALE_GYR( float value );
+        void   SCALE_ACC( double value );
+        void   SCALE_MAG( double value );
+        void   DELTA_GYR( double value );
+        void   CUTOFF_GYR( double value );
+        void   DELTA_ACC( double value );
+        void   MAG_DECLINATION( double value );
+
+        AHRS( double q, double r );
+        bool isReady( );
+        QQuaternion Quaternion( );
+        void setGyrCalibrationSettings( int tickCount );
+        void SetCalibrationData( QVector3D accMin, QVector3D accMax, QVector3D deltaGyr, QVector3D magMin, QVector3D magMax );
+        void Reset( );
+     public slots:
+        void SetSensorsData( ITrackerPacket *packet );
 };
 
 #endif // AHRS_H

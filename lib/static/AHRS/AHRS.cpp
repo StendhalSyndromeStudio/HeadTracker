@@ -1,91 +1,254 @@
-#include "AHRS.h"
+#include "ahrs.h"
+
 #include <math.h>
+#include <QtMath>
 
-QQuaternion AHRS::rotation( float gX, float gY, float gZ, float aX, float aY, float aZ ) {
-    float recipNorm;
-    float halfvx, halfvy, halfvz;
-    float halfex, halfey, halfez;
-    float qa, qb, qc;
-
-    if( !( ( aX == 0.0f ) && ( aY == 0.0f ) && ( aZ == 0.0f ) ) ) {
-        recipNorm = invSqrt( aX * aX + aY * aY + aZ * aZ );
-        aX *= recipNorm;
-        aY *= recipNorm;
-        aZ *= recipNorm;
-
-        halfvx = _x * _z - _scalar * _y;
-        halfvy = _scalar * _x + _y * _z;
-        halfvz = _scalar * _scalar - 0.5f + _z * _z;
-
-        halfex = ( aY * halfvz - aZ * halfvy );
-        halfey = ( aZ * halfvx - aX * halfvz );
-        halfez = ( aX * halfvy - aY * halfvx );
-
-        if( _twoKi > 0.0f ) {
-            _integralFBx += _twoKi * halfex * ( 1.0f / _sampleFreq );
-            _integralFBy += _twoKi * halfey * ( 1.0f / _sampleFreq );
-            _integralFBz += _twoKi * halfez * ( 1.0f / _sampleFreq );
-            gX += _integralFBx;
-            gY += _integralFBy;
-            gZ += _integralFBz;
+void AHRS::gyrCalibration( )
+{
+    if (_calibrationCount < _calibrationSize) {
+        for (int i = 0; i < 3; i++) {
+            _drift_gyr[ i ] = _driftGyr.at( i )->ApplyFilter( _sensorData.Gyr( i ) );
         }
-        else {
-            _integralFBx = 0.0f;
-            _integralFBy = 0.0f;
-            _integralFBz = 0.0f;
-        }
-        gX += _twoKp * halfex;
-        gY += _twoKp * halfey;
-        gZ += _twoKp * halfez;
+        _calibrationCount++;
     }
-    gX *= ( 0.5f * ( 1.0f / _sampleFreq ) );
-    gY *= ( 0.5f * ( 1.0f / _sampleFreq ) );
-    gZ *= ( 0.5f * ( 1.0f / _sampleFreq ) );
-    qa = _scalar;
-    qb = _x;
-    qc = _y;
-    _scalar += ( -qb * gX - qc * gY - _z * gZ );
-    _x += ( qa * gX + qc * gZ - _z * gY );
-    _y += ( qa * gY - qb * gZ + _z * gX );
-    _z += ( qa * gZ + qb * gY - qc * gX );
-
-
-    recipNorm = invSqrt( _scalar * _scalar + _x * _x + _y * _y + _z * _z );
-    _scalar *= recipNorm;
-    _x *= recipNorm;
-    _y *= recipNorm;
-    _z *= recipNorm;
-
-    return QQuaternion( _scalar, _x, _y, _z );
+    else {
+        _isCalibrationGyr = false;
+        qDebug() << "drift Gyr:" << _drift_gyr[0] << _drift_gyr[1] << _drift_gyr[2];
+    }
 }
 
-void AHRS::sampleFreq( float value ) {
-    _sampleFreq = value;
+void AHRS::setGyrCalibrationSettings( int tickCount )
+{
+    this->_calibrationCount = 0;
+    this->_calibrationSize = tickCount;
+    this->_isCalibrationGyr = true;
 }
 
-float AHRS::sampleFreq( ) {
-    return _sampleFreq;
+void AHRS::calculateAngle( )
+{
+    if ( _isStart )
+    {
+        for ( int i( 0 ); i < 3; i++ )
+        {
+            _filterAcc.at( i )->SetState( _sensorData.Acc( i ), 0.1f );
+            _filterGyr.at( i )->SetState( _sensorData.Gyr( i ), 0.1f );
+            //filter_Mag[i].SetState(sensor_data.mag[i], 0.1f);
+        }
+        _isStart = false;
+        _drift_gyr[ 0 ] = 0; _drift_gyr[ 1 ] = 0; _drift_gyr[ 2 ] = 0; _calibrationCount = 0;
+        _isCalibrationGyr = true;
+    }
+
+    if ( _isCalibrationGyr )
+    {
+        gyrCalibration( );
+        return;
+    }
+    correctionData( );
+
+    applyKalmanFilter( );
+
+    calculateQuaternion( );
 }
 
-float AHRS::invSqrt( float x ) {
-    float halfx = 0.5f * x;
-    float y = x;
-    long i = *( long* )&y;
-    i = 0x5f3759df - ( i >> 1 );
-    y = *( float* )&i;
-    y = y * ( 1.5f - ( halfx * y * y ) );
-    return y;
+void AHRS::correctionData( )
+{
+    for ( int i( 0 ); i < 3; i++ )
+    {
+
+        if ( _cutOffAcc )
+        {
+            if ( _sensorData.Acc( i ) > _fctAcc.at( i )->Max( ) * ( 1 + this->DELTA_ACC( ) ) )
+            {
+                _sensorData.Acc( i, _fctAcc.at( i )->Max( ) * ( 1 + this->DELTA_ACC( ) ) );
+            }
+            else
+            {
+                if ( _sensorData.Acc( i ) < _fctAcc.at( i )->Min( ) * ( 1 + this->DELTA_ACC( ) ) )
+                {
+                    _sensorData.Acc( i, _fctAcc.at( i )->Min( ) * ( 1 + this->DELTA_ACC( ) ) );
+                }
+            }
+        }
+        _sensorData.Acc( i, ( _sensorData.Acc( i ) - _fctAcc.at( i )->Mean( ) ) * _fctAcc.at( i )->Factor( ) );
+        if ( _sensorData.Gyr( i ) > _drift_gyr[ i ] - this->DELTA_GYR( ) && _sensorData.Gyr( i ) < _drift_gyr[i] + this->DELTA_GYR( ) )
+        {
+            _drift_gyr[ i ] = _driftGyr.at( i )->ApplyFilter( _sensorData.Gyr( i ) );
+        }
+        _sensorData.Gyr( i, _sensorData.Gyr( i ) - _drift_gyr[ i ] );
+    }
+    //qDebug( ) << "acc:" << _sensorData.Acc( 0 ) << " " << _sensorData.Acc( 1 ) << " " << _sensorData.Acc( 2 );
+    //qDebug( ) << "gyr:" << _sensorData.Gyr( 0 ) << " " << _sensorData.Gyr( 1 ) << " " << _sensorData.Gyr( 2 );
 }
 
-volatile float AHRS::_scalar{ 1.0f };
-volatile float AHRS::_x{ 0.0f };
-volatile float AHRS::_y{ 0.0f };
-volatile float AHRS::_z{ 0.0f };
+void AHRS::applyKalmanFilter( )
+{
+    for (int i( 0 ); i < 3; i++)
+    {
+        _filterAcc.at( i )->ApplyFilter( _sensorData.Acc( i ) );
+        _filterGyr.at( i)->ApplyFilter( _sensorData.Gyr( i ) );
+        //filter_Mag[i].ApplyFilter(sensor_data.mag[i]);
 
-volatile float AHRS::_sampleFreq{ 64.0f };
-volatile float AHRS::_twoKp{ 2.0f * 0.5f };
-volatile float AHRS::_twoKi{ 2.0f * 0.0f };
+        if ( qAbs( _filterGyr.at( i )->State( ) ) < this->CUTOFF_GYR( ) )
+        {
+            _filterGyr.at( i )->SetState( 0 );
+        }
+    }
+   //qDebug() << "Acc:" << _filterAcc.at( 0 )->State() << " " << _filterAcc.at( 1 )->State() << " " << _filterAcc.at( 2 )->State();
+   //qDebug() << "Gyr:" << _filterGyr.at( 0 )->State() << " " << _filterGyr.at( 1 )->State() << " " << _filterGyr.at( 2 )->State();
+}
 
-volatile float AHRS::_integralFBx{ 0.0f };
-volatile float AHRS::_integralFBy{ 0.0f };
-volatile float AHRS::_integralFBz{ 0.0f };
+void AHRS::calculateQuaternion( )
+{
+    _madgwickFilter.UpdateUpY( _filterGyr.at( 0 )->State( ) * this->DEG_TO_RAD( ),
+                               _filterGyr.at( 1 )->State( ) * this->DEG_TO_RAD( ),
+                               _filterGyr.at( 2 )->State( ) * this->DEG_TO_RAD( ),
+                               _filterAcc.at( 0 )->State( ),
+                               _filterAcc.at( 1 )->State( ),
+                              -_filterAcc.at( 2 )->State( ),
+                               _sensorData.DeltaTime( ) );
+}
+
+float AHRS::SCALE_GYR( )
+{
+    return _scaleGyr;
+}
+
+double AHRS::SCALE_ACC( )
+{
+    return _scaleAcc;
+}
+
+double AHRS::SCALE_MAG( )
+{
+    return _scaleMag;
+}
+
+double AHRS::DELTA_GYR( )
+{
+    return _deltaGyr;
+}
+
+double AHRS::CUTOFF_GYR( )
+{
+    return _cutoffGyr;
+}
+
+double AHRS::DELTA_ACC( )
+{
+    return _deltaAcc;
+}
+
+double AHRS::RAD_TO_DEG( )
+{
+    return 180 / M_PI;
+}
+
+double AHRS::DEG_TO_RAD( )
+{
+    return M_PI / 180;
+}
+
+double AHRS::MAG_DECLINATION( )
+{
+    return _magDeclination;
+}
+
+void AHRS::SCALE_GYR(float value)
+{
+    _scaleGyr = value;
+}
+
+void AHRS::SCALE_ACC(double value)
+{
+    _scaleAcc = value;
+}
+
+void AHRS::SCALE_MAG(double value)
+{
+    _scaleMag = value;
+}
+
+void AHRS::DELTA_GYR(double value)
+{
+    _deltaGyr = value;
+}
+
+void AHRS::CUTOFF_GYR(double value)
+{
+    _cutoffGyr = value;
+}
+
+void AHRS::DELTA_ACC(double value)
+{
+    _deltaAcc = value;
+}
+
+void AHRS::MAG_DECLINATION(double value)
+{
+    _magDeclination = value;
+}
+
+AHRS::AHRS(double q, double r)
+{
+    _isStart = true;
+
+    _scaleGyr = 1;
+    _scaleAcc = 2040;
+    _scaleMag = 2600;
+    _deltaGyr = 0.75;
+    _cutoffGyr = 0.75;
+    _deltaAcc = 0.1;
+    _magDeclination = 10.5;
+
+    for ( int i( 0 ); i < 3; i++ ) {
+        _driftGyr.append( new FloatAverage( 10 ) );
+        _filterAcc.append( new KalmanFilter( q, r, 1, 1 ) );
+        _filterGyr.append( new KalmanFilter( q, r, 1, 1 ) );
+    }
+}
+
+bool AHRS::isReady()
+{
+    return !this->_isCalibrationGyr;
+}
+
+QQuaternion AHRS::Quaternion()
+{
+    return _madgwickFilter.Quaternion( );
+}
+
+void AHRS::SetCalibrationData( QVector3D accMin, QVector3D accMax, QVector3D deltaGyr, QVector3D magMin, QVector3D magMax )
+{
+    Q_UNUSED( magMin );
+    Q_UNUSED( magMax );
+    _fctAcc.append( new FactorAccMag( accMin.x( ), accMax.x( ), this->SCALE_ACC( ) ) );
+    _fctAcc.append( new FactorAccMag( accMin.y( ), accMax.y( ), this->SCALE_ACC( ) ) );
+    _fctAcc.append( new FactorAccMag( accMin.z( ), accMax.z( ), this->SCALE_ACC( ) ) );
+    _drift_gyr[ 0 ] = deltaGyr.x( );
+    _drift_gyr[ 1 ] = deltaGyr.y( );
+    _drift_gyr[ 2 ] = deltaGyr.z( );
+
+    //this->calculateAngle( );
+}
+
+void AHRS::Reset( )
+{
+    _madgwickFilter.Reset( );
+}
+
+void AHRS::SetSensorsData( ITrackerPacket *packet )
+{
+    _sensorData.Acc( 0, packet->Acc( ).x( ) );
+    _sensorData.Acc( 1, packet->Acc( ).y( ) );
+    _sensorData.Acc( 2, packet->Acc( ).z( ) );
+
+    _sensorData.Gyr( 0, packet->Gyr( ).x( ) );
+    _sensorData.Gyr( 1, packet->Gyr( ).y( ) );
+    _sensorData.Gyr( 2, packet->Gyr( ).z( ) );
+
+//    _sensorData.TempAcc( );
+    //sensor_data.delta_time = data.dTime * 0.001f;
+    _sensorData.DeltaTime( packet->dTime( ) * 0.001f );
+    calculateAngle( );
+}
